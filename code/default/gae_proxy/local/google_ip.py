@@ -7,9 +7,23 @@ import threading
 import operator
 import time
 import Queue
-import os
+import os, sys
 
 current_path = os.path.dirname(os.path.abspath(__file__))
+
+
+if __name__ == "__main__":
+    python_path = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir, 'python27', '1.0'))
+
+    noarch_lib = os.path.abspath( os.path.join(python_path, 'lib', 'noarch'))
+    sys.path.append(noarch_lib)
+
+    if sys.platform == "win32":
+        win32_lib = os.path.abspath( os.path.join(python_path, 'lib', 'win32'))
+        sys.path.append(win32_lib)
+    elif sys.platform.startswith("linux"):
+        linux_lib = os.path.abspath( os.path.join(python_path, 'lib', 'linux'))
+        sys.path.append(linux_lib)
 
 import check_local_network
 import check_ip
@@ -182,12 +196,18 @@ class IpManager():
                             property['handshake_time'],
                             property['fail_times'],
                             property['down_fail']) )
+                fd.flush()
 
             self.iplist_need_save = False
         except Exception as e:
             xlog.error("save good_ip.txt fail %s", e)
         finally:
             self.ip_lock.release()
+
+    def _ip_rate(self, ip_info):
+        return ip_info['handshake_time'] + \
+                    (ip_info['fail_times'] * 1000 ) + \
+                    (ip_info['down_fail'] * 500 )
 
     def try_sort_gws_ip(self, force=False):
         if time.time() - self.last_sort_time_for_gws < 10 and not force:
@@ -201,9 +221,7 @@ class IpManager():
             for ip in self.ip_dict:
                 if 'gws' not in self.ip_dict[ip]['server']:
                     continue
-                ip_rate[ip] = self.ip_dict[ip]['handshake_time'] + \
-                    (self.ip_dict[ip]['fail_times'] * 1000 ) + \
-                    (self.ip_dict[ip]['down_fail'] * 500 )
+                ip_rate[ip] = self._ip_rate(self.ip_dict[ip])
                 if self.ip_dict[ip]['fail_times'] == 0:
                     self.good_ip_num += 1
 
@@ -232,7 +250,7 @@ class IpManager():
         else:
             try:
                 the_100th_ip = self.gws_ip_list[99]
-                the_100th_handshake_time = self.ip_dict[the_100th_ip]['handshake_time']
+                the_100th_handshake_time = self._ip_rate(self.ip_dict[the_100th_ip])
                 scan_ip_thread_num = int( (the_100th_handshake_time - 200)/2 * self.max_scan_ip_thread_num/50 )
             except Exception as e:
                 xlog.warn("adjust_scan_thread_num fail:%r", e)
@@ -386,7 +404,7 @@ class IpManager():
             return
 
         time_now = time.time()
-        check_local_network.network_stat = "OK"
+        check_local_network.report_network_ok()
         check_ip.last_check_time = time_now
         check_ip.continue_fail_count = 0
 
@@ -444,15 +462,12 @@ class IpManager():
             self.ip_dict[ip]['links'] -= 1
 
             # ignore if system network is disconnected.
-            if check_local_network.network_stat == "Fail":
+            if not check_local_network.is_ok():
                 xlog.debug("report_connect_fail network fail")
                 return
 
-            check_local_network.continue_fail_count += 1
-            if check_local_network.continue_fail_count > 10:
-                check_local_network.network_stat = "unknown"
-                xlog.debug("report_connect_fail continue_fail_count:%d", check_local_network.continue_fail_count)
-                check_local_network.triger_check_network()
+            check_local_network.report_network_fail()
+            if not check_local_network.is_ok():
                 return
 
             fail_time = self.ip_dict[ip]["fail_time"]
@@ -466,7 +481,6 @@ class IpManager():
             self.append_ip_history(ip, "fail")
             self.ip_dict[ip]["fail_time"] = time_now
 
-            check_local_network.triger_check_network()
             self.to_check_ip_queue.put((ip, time_now + 10))
             xlog.debug("report_connect_fail:%s", ip)
 
@@ -527,7 +541,7 @@ class IpManager():
             if time_wait > 0:
                 time.sleep(time_wait)
 
-            if check_local_network.network_stat == "Fail":
+            if not check_local_network.is_ok():
                 try:
                     if self.ip_dict[ip]['fail_times']:
                         self.ip_dict[ip]['fail_times'] = 0
@@ -536,8 +550,8 @@ class IpManager():
                     pass
                 continue
 
-            result = check_ip.test_gae_ip(ip)
-            if result:
+            result = check_ip.test_gae_ip2(ip)
+            if result and result.support_gae:
                 self.add_ip(ip, result.handshake_time, result.domain, "gws")
                 xlog.debug("restore ip:%s", ip)
                 continue
@@ -574,6 +588,30 @@ class IpManager():
         finally:
             self.ip_lock.release()
 
+    def recheck_ip(self, ip):
+        # recheck ip if not work.
+        # can block.
+        if not check_local_network.is_ok():
+            xlog.debug("recheck_ip:%s network is fail", ip)
+            return
+
+        self.report_connect_fail(ip)
+
+        connect_control.start_connect_register()
+        result = check_ip.test_gae_ip2(ip)
+        connect_control.end_connect_register()
+        if not result:
+            # connect fail.
+            # do nothing
+            return
+
+        if not result.support_gae:
+            self.report_connect_fail(ip, force_remove=True)
+            xlog.debug("recheck_ip:%s real fail, removed.", ip)
+        else:
+            self.add_ip(ip, result.handshake_time, result.domain, "gws")
+            xlog.debug("recheck_ip:%s restore okl", ip)
+
     def scan_ip_worker(self):
         while self.scan_thread_count <= self.scan_ip_thread_num and connect_control.keep_running:
             if not connect_control.allow_scan():
@@ -588,9 +626,9 @@ class IpManager():
                     continue
 
                 connect_control.start_connect_register()
-                result = check_ip.test_gae_ip(ip)
+                result = check_ip.test_gae_ip2(ip)
                 connect_control.end_connect_register()
-                if not result:
+                if not result or not result.support_gae:
                     continue
 
                 if self.add_ip(ip, result.handshake_time, result.domain, "gws"):
@@ -606,7 +644,7 @@ class IpManager():
         self.scan_thread_lock.acquire()
         self.scan_thread_count -= 1
         self.scan_thread_lock.release()
-        xlog.info("scan_ip_worker exit")
+        #xlog.info("scan_ip_worker exit")
 
     def search_more_google_ip(self):
         if config.USE_IPV6:
@@ -670,7 +708,7 @@ class IpManager():
                 break
 
             connect_control.start_connect_register()
-            result = check_ip.test_gae_ip(ip)
+            result = check_ip.test_gae_ip2(ip)
             connect_control.end_connect_register()
             if not result:
                 self.ip_lock.acquire()
@@ -684,7 +722,14 @@ class IpManager():
                     self.ip_dict[ip]["fail_time"] = time.time()
                 finally:
                     self.ip_lock.release()
-            else:
+            elif result.support_gae:
                 self.add_ip(ip, result.handshake_time, result.domain, "gws")
+            else:
+                self.report_connect_fail(ip, force_remove=True)
 
 google_ip = IpManager()
+
+if __name__ == "__main__":
+    google_ip.scan_all_exist_ip()
+    while True:
+        time.sleep(1)

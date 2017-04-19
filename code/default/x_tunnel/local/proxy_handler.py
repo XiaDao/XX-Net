@@ -1,12 +1,12 @@
 import time
-import socket, SocketServer, struct
+import socket, struct
 
 import utils
 from xlog import getLogger
 xlog = getLogger("x_tunnel")
 
 import global_var as g
-
+import proxy_session
 
 class Socks5Server():
     read_buffer = ""
@@ -105,7 +105,7 @@ class Socks5Server():
         else:
             addr = ip
 
-        conn_id = g.session.create_conn(sock, addr, port)
+        conn_id = proxy_session.create_conn(sock, addr, port)
         if not conn_id:
             xlog.warn("Socks4 connect fail, no conn_id")
             reply = b"\x00\x5b\x00" + addr_pack + struct.pack(">H", port)
@@ -125,11 +125,15 @@ class Socks5Server():
         sock = self.connection
         auth_mode_num = ord(self.read_bytes(1))
         data = self.read_bytes(auth_mode_num)
-        # xlog.debug("client version:%d, auth num:%d, list:%s", 5, auth_mode_num, utils.str2hex(data))
 
         sock.send(b"\x05\x00")  # socks version 5, no auth needed.
+        try:
+            data = self.read_bytes(4)
+        except Exception as e:
+            xlog.debug("socks5 auth num:%d, list:%s", auth_mode_num, utils.str2hex(data))
+            xlog.exception("socks5 protocol error:%r", e)
+            return
 
-        data = self.read_bytes(4)
         socks_version = ord(data[0])
         if socks_version != 5:
             xlog.warn("request version:%d error", socks_version)
@@ -162,7 +166,7 @@ class Socks5Server():
 
         port = struct.unpack('>H', self.rfile.read(2))[0]
 
-        conn_id = g.session.create_conn(sock, addr, port)
+        conn_id = proxy_session.create_conn(sock, addr, port)
         if not conn_id:
             xlog.warn("create conn fail")
             reply = b"\x05\x01\x00" + addrtype_pack + addr_pack + struct.pack(">H", port)
@@ -200,7 +204,7 @@ class Socks5Server():
         port = int(port)
 
         sock = self.connection
-        conn_id = g.session.create_conn(sock, host, port)
+        conn_id = proxy_session.create_conn(sock, host, port)
         if not conn_id:
             xlog.warn("create conn fail")
             sock.send(b'HTTP/1.1 500 Fail\r\n\r\n')

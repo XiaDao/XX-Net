@@ -63,6 +63,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
 
     bufsize = 256*1024
     max_retry = 3
+    local_names = []
 
     def setup(self):
         self.__class__.do_GET = self.__class__.do_METHOD
@@ -119,6 +120,52 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
 
         self.wfile.write("".join(out_list))
 
+    def send_method_allows(self, headers, payload):
+        xlog.debug("send method allow list for:%s %s", self.command, self.path)
+        # Refer: https://developer.mozilla.org/en-US/docs/Web/HTTP/Access_control_CORS#Preflighted_requests
+
+        response = \
+                "HTTP/1.1 200 OK\r\n"\
+                "Access-Control-Allow-Credentials: true\r\n"\
+                "Access-Control-Allow-Methods: GET, POST, HEAD, PUT, DELETE, PATCH\r\n"\
+                "Access-Control-Max-Age: 1728000\r\n"\
+                "Content-Length: 0\r\n"
+
+        req_header = headers.get("Access-Control-Request-Headers", "")
+        if req_header:
+            response += "Access-Control-Allow-Headers: %s\r\n" % req_header
+
+        origin = headers.get("Origin", "")
+        if origin:
+            response += "Access-Control-Allow-Origin: %s\r\n" % origin
+        else:
+            response += "Access-Control-Allow-Origin: *\r\n"
+
+        response += "\r\n"
+
+        self.wfile.write(response)
+
+    def is_local(self, hosts):
+        if 0 == len(self.local_names):
+            self.local_names.append('localhost')
+            self.local_names.append(socket.gethostname().lower());
+            try:
+                self.local_names.append(socket.gethostbyname_ex(socket.gethostname())[-1])
+            except socket.gaierror:
+                # TODO Append local IP address to local_names
+                pass
+
+        for s in hosts:
+            s = s.lower()
+            if s.startswith('127.') \
+                    or s.startswith('192.168.') \
+                    or s.startswith('10.') \
+                    or s.startswith('169.254.') \
+                    or s in self.local_names:
+                print s
+                return True
+        return False
+
     def do_METHOD(self):
         touch_active()
         # record active time.
@@ -127,11 +174,11 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
         host = self.headers.get('Host', '')
         host_ip, _, port = host.rpartition(':')
         if host_ip == "127.0.0.1" and port == str(config.LISTEN_PORT):
-            controler = web_control.ControlHandler(self.client_address, self.headers, self.command, self.path, self.rfile, self.wfile)
+            controller = web_control.ControlHandler(self.client_address, self.headers, self.command, self.path, self.rfile, self.wfile)
             if self.command == "GET":
-                return controler.do_GET()
+                return controller.do_GET()
             elif self.command == "POST":
-                return controler.do_POST()
+                return controller.do_POST()
             else:
                 xlog.warn("method not defined: %s", self.command)
                 return
@@ -141,11 +188,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
         elif not host and '://' in self.path:
             host = urlparse.urlparse(self.path).netloc
 
-        if host.startswith("127.0.0.1") or host.startswith("localhost"):
-            #xlog.warn("Your browser forward localhost to proxy.")
-            return self.forward_local()
-
-        if host_ip in socket.gethostbyname_ex(socket.gethostname())[-1]:
+        if self.is_local([host, host_ip]):
             xlog.info("Browse localhost by proxy")
             return self.forward_local()
 
@@ -211,6 +254,14 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
                 payload += self.rfile.read(chunk_size)
                 get_crlf(self.rfile)
 
+        if self.command == "OPTIONS":
+            return self.send_method_allows(request_headers, payload)
+
+        if self.command not in self.gae_support_methods:
+            xlog.warn("Method %s not support in GAEProxy for %s", self.command, self.path)
+            return self.wfile.write(('HTTP/1.1 404 Not Found\r\n\r\n').encode())
+
+        xlog.debug("GAE %s %s", self.command, self.path)
         gae_handler.handler(self.command, self.path, request_headers, payload, self.wfile)
 
     def do_CONNECT(self):
@@ -237,7 +288,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
         host, _, port = self.path.rpartition(':')
         port = int(port)
         certfile = CertUtil.get_cert(host)
-        xlog.info('GAE %s %s:%d ', self.command, host, port)
+        # xlog.info('https GAE %s %s:%d ', self.command, host, port)
         self.__realconnection = None
         self.wfile.write(b'HTTP/1.1 200 OK\r\n\r\n')
 
@@ -269,7 +320,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
                 xlog.warn("read request line len:%d", len(self.raw_requestline))
                 return
             if not self.raw_requestline:
-                xlog.warn("read request line empty")
+                # xlog.warn("read request line empty")
                 return
             if not self.parse_request():
                 xlog.warn("parse request fail:%s", self.raw_requestline)
@@ -286,26 +337,6 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
             # auto detect browser proxy setting is work
             xlog.debug("CONNECT %s %s", self.command, self.path)
             return self.wfile.write(self.self_check_response_data)
-
-        xlog.debug('GAE CONNECT %s %s', self.command, self.path)
-        if self.command not in self.gae_support_methods:
-            if host.endswith(".google.com") or host.endswith(config.HOSTS_DIRECT_ENDSWITH) or host.endswith(config.HOSTS_GAE_ENDSWITH):
-                if host in config.HOSTS_GAE:
-                    gae_set = [s for s in config.HOSTS_GAE]
-                    gae_set.remove(host)
-                    config.HOSTS_GAE = tuple(gae_set)
-                if host not in config.HOSTS_DIRECT:
-                    fwd_set = [s for s in config.HOSTS_DIRECT]
-                    fwd_set.append(host)
-                    config.HOSTS_DIRECT = tuple(fwd_set)
-                xlog.warn("Method %s not support in GAE, Redirect to DIRECT for %s", self.command, self.path)
-                content_length = 'Content-Length: 0\r\n'
-                if re.match(r'clients\d\.google\.com', host):
-                    content_length = ''
-                return self.wfile.write(('HTTP/1.1 301\r\nLocation: %s\r\n%s\r\n' % (self.path, content_length)).encode())
-            else:
-                xlog.warn("Method %s not support in GAEProxy for %s", self.command, self.path)
-                return self.wfile.write(('HTTP/1.1 404 Not Found\r\n\r\n').encode())
 
         try:
             if self.path[0] == '/' and host:
@@ -420,4 +451,3 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
                     pass
                 finally:
                     self.__realconnection = None
-

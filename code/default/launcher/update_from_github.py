@@ -93,17 +93,19 @@ def parse_readme_versions(readme_file):
     try:
         fd = open(readme_file, "r")
         lines = fd.readlines()
-        p = re.compile(r'https://codeload.github.com/XX-net/XX-Net/zip/([0-9]+)\.([0-9]+)\.([0-9]+)')
+        p = re.compile(r'https://codeload.github.com/XX-net/XX-Net/zip/([0-9]+)\.([0-9]+)\.([0-9]+) ([0-9a-f]*)')
         for line in lines:
             m = p.match(line)
             if m:
                 version = m.group(1) + "." + m.group(2) + "." + m.group(3)
-                versions.append([m.group(0), version])
+                hashsum = m.group(4)
+                versions.append([m.group(0), version, hashsum])
                 if len(versions) == 2:
                     return versions
     except Exception as e:
         xlog.exception("xxnet_version fail:%r", e)
-        raise "get_version_fail:" % readme_file
+
+    raise "get_version_fail:" % readme_file
 
 
 def current_version():
@@ -133,11 +135,18 @@ def get_github_versions():
     return versions
 
 
-def sha1_file(filename):
+def get_hash_sum(version):
+    versions = get_github_versions()
+    for v in versions:
+        if v[1] == version:
+            return v[2]
+
+
+def hash_file_sum(filename):
     import hashlib
 
     BLOCKSIZE = 65536
-    hasher = hashlib.sha1()
+    hasher = hashlib.sha256()
     try:
         with open(filename, 'rb') as afile:
             buf = afile.read(BLOCKSIZE)
@@ -155,8 +164,12 @@ def overwrite(xxnet_version, xxnet_unzip_path):
         for root, subdirs, files in os.walk(xxnet_unzip_path):
             relate_path = root[len(xxnet_unzip_path)+1:]
             target_relate_path = relate_path
-            if target_relate_path.startswith("code/default"):
-                target_relate_path = "code/" + xxnet_version + relate_path[12:]
+            if sys.platform == 'win32':
+                if target_relate_path.startswith("code\\default"):
+                    target_relate_path = "code\\" + xxnet_version + relate_path[12:]
+            else:
+                if target_relate_path.startswith("code/default"):
+                    target_relate_path = "code/" + xxnet_version + relate_path[12:]
 
             for subdir in subdirs:
                 if relate_path == "code" and subdir == "default":
@@ -170,13 +183,15 @@ def overwrite(xxnet_version, xxnet_unzip_path):
             for filename in files:
                 src_file = os.path.join(root, filename)
                 dst_file = os.path.join(top_path, target_relate_path, filename)
-                if not os.path.isfile(dst_file) or sha1_file(src_file) != sha1_file(dst_file):
+                if not os.path.isfile(dst_file) or hash_file_sum(src_file) != hash_file_sum(dst_file):
                     xlog.info("copy %s => %s", src_file, dst_file)
-                    shutil.copy(src_file, dst_file)
-
-                st = os.stat(src_file)
-                if st.st_mode & stat.S_IEXEC:
-                    os.chmod(dst_file, st.st_mode)
+                    if sys.platform != 'win32' and os.path.isfile(dst_file):
+                        st = os.stat(dst_file)
+                        shutil.copy(src_file, dst_file)
+                        if st.st_mode & stat.S_IEXEC:
+                            os.chmod(dst_file, st.st_mode)
+                    else:
+                        shutil.copy(src_file, dst_file)
 
     except Exception as e:
         xlog.warn("update over write fail:%r", e)
@@ -195,7 +210,13 @@ def download_overwrite_new_version(xxnet_version):
     progress["update_status"] = "Downloading %s" % xxnet_url
     if not download_file(xxnet_url, xxnet_zip_file):
         progress["update_status"] = "Download Fail."
-        raise Exception("download xxnet zip fail:%s" % download_path)
+        raise Exception("download xxnet zip fail:%s" % xxnet_zip_file)
+
+    hash_sum = get_hash_sum(xxnet_version)
+    if len(hash_sum) and hash_file_sum(xxnet_zip_file) != hash_sum:
+        progress["update_status"] = "Download Checksum Fail."
+        raise Exception("download xxnet zip checksum fail:%s" % xxnet_zip_file)
+
     xlog.info("update download %s finished.", download_path)
 
     xlog.info("update start unzip")
@@ -207,7 +228,7 @@ def download_overwrite_new_version(xxnet_version):
     except Exception as e:
         xlog.warn("unzip %s fail:%r", xxnet_zip_file, e)
         progress["update_status"] = "Unzip Fail:%s" % e
-        raise
+        raise e
     xlog.info("update finished unzip")
 
     overwrite(xxnet_version, xxnet_unzip_path)
@@ -231,8 +252,8 @@ def restart_xxnet(version):
     start_script = os.path.join(top_path, "code", version, "launcher", "start.py")
 
     subprocess.Popen([sys.executable, start_script])
-    time.sleep(10)
-    os._exit(0)
+    time.sleep(20)
+    #os._exit(0)
 
 
 def update_version(version):

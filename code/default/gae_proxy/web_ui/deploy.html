@@ -17,13 +17,23 @@
                     <input id="gae-appid" type="text" placeholder='{{ _("Delimit multiple appids with |") }}' />
                 </div> <!-- .span8 -->
             </div> <!-- .row-fluid -->
+
+            <div class="row-fluid">
+                <div class="span4">
+                    <label for="show-debug-log">{{ _( "Show Debug Log" ) }}</label>
+                </div> <!-- .span4 -->
+                <div class="span8">
+                    <input id="show-debug-log" type="checkbox" data-toggle="switch" />
+                </div> <!-- .span8 -->
+            </div> <!-- .row-fluid -->
+
             <div class="row-fluid">
                 <div class="span12">
                     <button class="btn btn-primary btn-block" type="submit">{{ _("Start to deploy") }}</button>
                 </div> <!-- .span12 -->
             </div> <!-- .row-fluid -->
         </form>
-        <p class="tip">* {{ _( "Redploy the server if XX-Net version is prior to 1.13.6." ) }}</p>
+        <p class="tip">* {{ _( "Auth window will popup, make sure don't block popup in browser." ) }}</p>
     </div> <!-- #authentication -->
     <div id="logs" class="tab-pane fade">
         <div id="log" class="span12"></div>
@@ -31,6 +41,15 @@
 </div> <!-- #tab-content -->
 
 <!-- JavaScript -->
+
+<script type="text/javascript">
+    $(function() {
+        $('[data-toggle=switch]').wrap('<div class="switch" />').parent().bootstrapSwitch();
+    });
+
+    $('#show-debug-log').parent().removeClass('switch-off');
+</script>
+
 <script type="text/javascript">
     $(function() {
         window.status = 'init';
@@ -162,6 +181,7 @@
 <script type="text/javascript">
     function onStart(){
         var appId        = $('#gae-appid').val();
+        var debug = $('#show-debug-log').is(':checked') ? 1 : 0;
         var errorMessage = getErrorMessage(appId);
 
         if ( errorMessage.length != 0 ) {
@@ -175,7 +195,7 @@
             $('.alert').addClass('alert-info');
         }
 
-        deployProcess(appId);
+        deployProcess(appId, debug);
         changeButtonStatus('cancel');
     }
 </script>
@@ -207,9 +227,10 @@
     }
 </script>
 <script type="text/javascript">
-    function deployProcess(appId) {
+    function deployProcess(appId, debug) {
         var authentication = {
-            'appid': appId
+            'appid': appId,
+            'debug': debug
         };
 
         $.ajax({
